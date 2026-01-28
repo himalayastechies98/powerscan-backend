@@ -85,7 +85,7 @@ async def extract_thermal_data(file: UploadFile = File(...)):
     except ImportError:
         raise HTTPException(
             status_code=500,
-            detail="flirimageextractor not installed"
+            detail="flirimageextractor failed to load: {str(e)}"
         )
     except Exception as e:
         raise HTTPException(
