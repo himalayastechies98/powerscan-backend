@@ -90,8 +90,8 @@ async def extract_thermal_data(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"flirimageextractor failed to load: {str(e)}"
-      )
+            detail=f"flirimageextractor failed to load: {e}"
+       )
 
 
 @app.get("/api/demo")
