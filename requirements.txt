@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+numpy
+flirimageextractor
+Pillow
+exifread
+python-multipart
