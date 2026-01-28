@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 numpy
-flirimageextractor==1.5.9
+flirimageextractor
 opencv-python-headless
 Pillow
 exifread
