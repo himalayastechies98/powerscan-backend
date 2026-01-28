@@ -125,3 +125,7 @@ async def demo_data():
         "maxTemp": round(float(np.max(thermal)), 2),
         "temperatures": thermal.flatten().tolist()
     })
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
