@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 numpy
-flirimageextractor
+flirimageextractor==1.1.6
 Pillow
 exifread
 python-multipart
