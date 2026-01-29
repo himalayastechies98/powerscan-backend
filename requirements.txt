@@ -1,8 +1,5 @@
 fastapi
-uvicorn[standard]
+uvicorn
 numpy
-flirimageextractor
-opencv-python-headless
-Pillow
-exifread
+pillow
 python-multipart
