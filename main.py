@@ -5,7 +5,6 @@ Extracts temperature data from radiometric FLIR JPG images.
 
 import os
 import tempfile
-import traceback
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,83 +12,111 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI(
     title="FLIR Thermal Image API",
+    description="Extract temperature data from radiometric FLIR images",
     version="1.0.0"
 )
 
-# Enable CORS
+# Enable CORS (safe for frontend usage)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.get("/")
-def root():
-    return {"status": "running", "service": "flir-thermal-api"}
-
-
 @app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "flir-thermal-api"
+    }
 
 
 @app.post("/api/thermal")
 async def extract_thermal_data(file: UploadFile = File(...)):
+    """
+    Extract temperature data from a FLIR radiometric JPG image.
+    """
     if not file.filename.lower().endswith((".jpg", ".jpeg")):
-        raise HTTPException(400, "Only JPG/JPEG files are supported")
-
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "Empty file uploaded")
+        raise HTTPException(
+            status_code=400,
+            detail="Only JPG/JPEG files are supported"
+        )
 
     try:
         import flirimageextractor
 
+        content = await file.read()
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-            tmp.write(data)
+            tmp.write(content)
             tmp_path = tmp.name
 
         try:
-            flir = flirimageextractor.FlirImageExtractor(is_debug=False)
+            flir = flirimageextractor.FlirImageExtractor(palettes=[])
             flir.process_image(tmp_path)
 
-            # Correct & version-safe access
-            thermal_np = getattr(flir, "thermal_np", None)
+            thermal_np = flir.get_thermal_np()
 
             if thermal_np is None:
                 raise HTTPException(
                     status_code=400,
-                    detail="No thermal data found. Image is not a radiometric FLIR JPG."
+                    detail="Image is not a radiometric FLIR image"
                 )
 
+            height, width = thermal_np.shape
+            min_temp = float(np.min(thermal_np))
+            max_temp = float(np.max(thermal_np))
+
             return JSONResponse(content={
-                "width": int(thermal_np.shape[1]),
-                "height": int(thermal_np.shape[0]),
-                "minTemp": round(float(np.min(thermal_np)), 2),
-                "maxTemp": round(float(np.max(thermal_np)), 2),
+                "width": width,
+                "height": height,
+                "minTemp": round(min_temp, 2),
+                "maxTemp": round(max_temp, 2),
                 "temperatures": thermal_np.flatten().tolist()
             })
 
         finally:
-            os.remove(tmp_path)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        traceback.print_exc()
+    except ImportError:
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail="flirimageextractor not installed"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing image: {str(e)}"
         )
 
 
 @app.get("/api/demo")
-def demo_data():
-    width, height = 320, 240
-    thermal = np.random.uniform(20, 45, (height, width))
+async def demo_data():
+    """
+    Generates synthetic thermal data for frontend testing.
+    """
+    width = 320
+    height = 240
+
+    x = np.linspace(0, 1, width)
+    y = np.linspace(0, 1, height)
+    xx, yy = np.meshgrid(x, y)
+
+    center_x, center_y = 0.6, 0.4
+    distance = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
+
+    min_temp = 20.0
+    max_temp = 45.0
+
+    thermal = max_temp - (distance * (max_temp - min_temp) * 1.5)
+    thermal = np.clip(thermal, min_temp, max_temp)
+
+    noise = np.random.normal(0, 0.5, (height, width))
+    thermal = np.clip(thermal + noise, min_temp, max_temp)
 
     return JSONResponse(content={
         "width": width,
