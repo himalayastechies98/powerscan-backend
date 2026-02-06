@@ -5,6 +5,12 @@ RUN apt-get update \
        exiftool \
        libgl1 \
        libglib2.0-0 \
+       build-essential \
+       libffi-dev \
+       libjpeg-dev \
+       zlib1g-dev \
+       libcairo2-dev \
+       pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
