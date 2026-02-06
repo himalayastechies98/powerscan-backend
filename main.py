@@ -1,14 +1,23 @@
-import tempfile
-import numpy as np
-from PIL import Image
+"""
+PowerScan Backend API
+- Thermal image processing
+- PDF report generation
+"""
+import io
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+
+# Import from modules
+from models import MeasureData, ElementData, PDFRequest
+from thermal import process_thermal_upload
+from pdf_generator import generate_pdf, generate_qr_code_base64, generate_html_report, html_to_pdf
+
 
 app = FastAPI(
-    title="Thermal Estimation API",
-    description="Estimate relative temperature data from any thermal-like image",
+    title="PowerScan API",
+    description="Thermal image processing and PDF report generation",
     version="1.0.0"
 )
 
@@ -21,32 +30,22 @@ app.add_middleware(
 )
 
 
-def estimate_temperature_from_image(
-    image_path: str,
-    min_temp: float = 20.0,
-    max_temp: float = 45.0
-):
-    """
-    Estimate relative temperature from image brightness.
-    NOT real temperature.
-    """
-    img = Image.open(image_path).convert("L")  # grayscale
-    gray = np.array(img).astype(np.float32)
-
-    norm = (gray - gray.min()) / (gray.max() - gray.min() + 1e-6)
-    thermal = min_temp + norm * (max_temp - min_temp)
-
-    return thermal
-
+# ============ HEALTH CHECK ============
 
 @app.get("/health")
 async def health_check():
+    """Health check endpoint"""
     return {"status": "healthy"}
 
 
+# ============ THERMAL PROCESSING ============
+
 @app.post("/api/thermal")
 async def extract_estimated_thermal(file: UploadFile = File(...)):
-
+    """
+    Process a thermal image and return estimated temperature data.
+    Note: Temperatures are relative, not absolute.
+    """
     if not file.filename.lower().endswith((".jpg", ".jpeg", ".png")):
         raise HTTPException(400, "Only JPG/JPEG/PNG files are supported")
 
@@ -54,31 +53,102 @@ async def extract_estimated_thermal(file: UploadFile = File(...)):
     if not content:
         raise HTTPException(400, "Empty file uploaded")
 
-    tmp_path = None
-
     try:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
+        result = await process_thermal_upload(content)
+        return JSONResponse(result)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to process thermal image: {str(e)}")
 
-        thermal_np = estimate_temperature_from_image(tmp_path)
 
-        h, w = thermal_np.shape
+# ============ PDF GENERATION ============
 
-        return JSONResponse({
-            "mode": "estimated",
-            "warning": "Temperatures are relative, not absolute",
-            "width": w,
-            "height": h,
-            "minTemp": round(float(np.min(thermal_np)), 2),
-            "maxTemp": round(float(np.max(thermal_np)), 2),
-            "temperatures": thermal_np.flatten().tolist()
-        })
+@app.post("/api/pdf/{measure_id}")
+async def generate_pdf_report(measure_id: str, request: PDFRequest):
+    """Generate PDF report for a measure"""
+    try:
+        pdf_bytes = await generate_pdf(
+            measure=request.measure_data,
+            elements=request.elements or [],
+            thermal_image_url=request.thermal_image_url,
+            optical_image_url=request.optical_image_url
+        )
+        
+        filename = f"relatorio_medida_{measure_id[:8]}.pdf"
+        
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+    except Exception as e:
+        print(f"PDF generation error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Failed to generate PDF: {str(e)}")
 
-    finally:
-        if tmp_path:
-            try:
-                import os
-                os.remove(tmp_path)
-            except Exception:
-                pass
+
+@app.get("/api/pdf/test")
+async def test_pdf():
+    """Test endpoint to generate a sample PDF"""
+    sample_measure = MeasureData(
+        id_unico="b74b9584-a2a4-4d93-89c7-bf9fb8f83993",
+        localizacao="Rua Santo Antônio Jardim Carolina 78890-000 Sorriso",
+        latitude=-12.545363,
+        longitude=-55.754127,
+        temp1_c=31.3,
+        data_criacao=45930.85,
+        alimentador="RSI_088009_201 4237",
+        nome_inspecao="2025 EMT - RSI",
+        vel_do_ar_na_inspecao_ms=0.9,
+        umidade_relativa=27.79,
+        carregamento=100
+    )
+    
+    sample_elements = [
+        ElementData(
+            numero_operativo="N/A",
+            elemento="(1) Árvore",
+            temperatura="-",
+            metodo="Absolute",
+            calculada="-Infinity °C",
+            acao="Pruning"
+        ),
+        ElementData(
+            numero_operativo="N/A",
+            elemento="(2) Baixa",
+            temperatura="-",
+            metodo="-",
+            calculada="-",
+            acao="-"
+        ),
+        ElementData(
+            numero_operativo="N/A",
+            elemento="(3) 7294115",
+            temperatura="-",
+            metodo="-",
+            calculada="-",
+            acao="-"
+        )
+    ]
+    
+    # Generate QR code
+    qr_code_b64 = generate_qr_code_base64(f"https://powerscan.app/measure/{sample_measure.id_unico}")
+    
+    # Generate HTML
+    html_content = generate_html_report(
+        sample_measure, sample_elements,
+        None, None, None, qr_code_b64
+    )
+    
+    # Convert to PDF
+    pdf_bytes = html_to_pdf(html_content)
+    
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": "attachment; filename=test_report.pdf"
+        }
+    )

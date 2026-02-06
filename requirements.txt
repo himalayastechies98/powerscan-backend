@@ -3,3 +3,6 @@ uvicorn
 numpy
 pillow
 python-multipart
+xhtml2pdf
+qrcode
+httpx
