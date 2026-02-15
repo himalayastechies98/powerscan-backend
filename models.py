@@ -41,4 +41,6 @@ class PDFRequest(BaseModel):
     measure_data: MeasureData
     thermal_image_url: Optional[str] = None
     optical_image_url: Optional[str] = None
+    client_company_logo_url: Optional[str] = None
+    language: Optional[str] = "pt"
     elements: Optional[List[ElementData]] = []

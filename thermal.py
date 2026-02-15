@@ -10,7 +10,7 @@ from PIL import Image as PILImage
 def estimate_temperature_from_image(
     image_path: str,
     min_temp: float = 20.0,
-    max_temp: float = 45.0
+    max_temp: float = 500.0
 ) -> np.ndarray:
     """
     Estimate relative temperature from image brightness.
@@ -33,29 +33,35 @@ def estimate_temperature_from_image(
     return thermal
 
 
-async def process_thermal_upload(content: bytes) -> dict:
+async def process_thermal_upload(content: bytes, min_temp: float = 20.0, max_temp: float = None) -> dict:
     """
     Process uploaded thermal image and return temperature data.
     
     Args:
         content: Raw bytes of the uploaded image
+        min_temp: Minimum temperature for calibration (default 20.0)
+        max_temp: Maximum temperature from measure's temp1_c (if None, estimates from image)
     
     Returns:
         Dictionary with thermal data
     """
     tmp_path = None
+    
+    # Default max_temp if not provided
+    if max_temp is None:
+        max_temp = 500.0  # Fallback to wide range
 
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
             tmp.write(content)
             tmp_path = tmp.name
 
-        thermal_np = estimate_temperature_from_image(tmp_path)
+        thermal_np = estimate_temperature_from_image(tmp_path, min_temp=min_temp, max_temp=max_temp)
         h, w = thermal_np.shape
 
         return {
-            "mode": "estimated",
-            "warning": "Temperatures are relative, not absolute",
+            "mode": "calibrated" if max_temp != 500.0 else "estimated",
+            "warning": None if max_temp != 500.0 else "Temperatures are relative, not absolute",
             "width": w,
             "height": h,
             "minTemp": round(float(np.min(thermal_np)), 2),

@@ -5,9 +5,10 @@ PowerScan Backend API
 """
 import io
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from typing import Optional
 
 # Import from modules
 from models import MeasureData, ElementData, PDFRequest
@@ -41,10 +42,14 @@ async def health_check():
 # ============ THERMAL PROCESSING ============
 
 @app.post("/api/thermal")
-async def extract_estimated_thermal(file: UploadFile = File(...)):
+async def extract_estimated_thermal(
+    file: UploadFile = File(...),
+    min_temp: Optional[float] = Query(20.0, description="Minimum temperature for scale"),
+    max_temp: Optional[float] = Query(None, description="Maximum temperature for scale (from temp1_c)")
+):
     """
     Process a thermal image and return estimated temperature data.
-    Note: Temperatures are relative, not absolute.
+    Pass max_temp from the measure's temp1_c field for accurate scaling.
     """
     if not file.filename.lower().endswith((".jpg", ".jpeg", ".png")):
         raise HTTPException(400, "Only JPG/JPEG/PNG files are supported")
@@ -54,7 +59,7 @@ async def extract_estimated_thermal(file: UploadFile = File(...)):
         raise HTTPException(400, "Empty file uploaded")
 
     try:
-        result = await process_thermal_upload(content)
+        result = await process_thermal_upload(content, min_temp=min_temp, max_temp=max_temp)
         return JSONResponse(result)
     except Exception as e:
         raise HTTPException(500, f"Failed to process thermal image: {str(e)}")
@@ -70,7 +75,9 @@ async def generate_pdf_report(measure_id: str, request: PDFRequest):
             measure=request.measure_data,
             elements=request.elements or [],
             thermal_image_url=request.thermal_image_url,
-            optical_image_url=request.optical_image_url
+            optical_image_url=request.optical_image_url,
+            client_company_logo_url=request.client_company_logo_url,
+            language=request.language or "pt"
         )
         
         filename = f"relatorio_medida_{measure_id[:8]}.pdf"

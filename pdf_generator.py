@@ -2,15 +2,32 @@
 PDF generation utilities using xhtml2pdf
 """
 import io
+import math
 import base64
 from datetime import datetime, timedelta
 from typing import List, Optional
+import os
 import httpx
 import qrcode
+from PIL import Image, ImageDraw
 
 from xhtml2pdf import pisa
 
 from models import MeasureData, ElementData
+
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
+def _load_logo_base64(filename: str) -> Optional[str]:
+    """Load a logo image from assets dir and return as base64 data URI"""
+    try:
+        filepath = os.path.join(ASSETS_DIR, filename)
+        if os.path.exists(filepath):
+            with open(filepath, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+            return f"data:image/png;base64,{b64}"
+    except Exception as e:
+        print(f"Error loading logo {filename}: {e}")
+    return None
 
 
 def excel_date_to_datetime(excel_date: float) -> Optional[datetime]:
@@ -52,12 +69,198 @@ def generate_qr_code_base64(data: str) -> str:
     return f"data:image/png;base64,{b64}"
 
 
-def get_static_map_url(lat: float, lon: float, zoom: int = 17, width: int = 600, height: int = 400) -> Optional[str]:
-    """Generate static map URL using OpenStreetMap"""
-    if lat and lon:
-        # Using staticmap.io service
-        return f"https://staticmap.io/?center={lat},{lon}&zoom={zoom}&size={width}x{height}&maptype=roadmap&markers=size:mid|color:0x333333|{lat},{lon}"
-    return None
+def _lat_lon_to_tile(lat: float, lon: float, zoom: int):
+    """Convert lat/lon to tile coordinates"""
+    lat_rad = math.radians(lat)
+    n = 2 ** zoom
+    x = (lon + 180.0) / 360.0 * n
+    y = (1.0 - math.log(math.tan(lat_rad) + 1 / math.cos(lat_rad)) / math.pi) / 2.0 * n
+    return x, y
+
+
+def _draw_pin_marker(draw: ImageDraw, cx: int, cy: int, color=(239, 68, 68), size=32):
+    """Draw a pin marker at the given pixel coordinates"""
+    # Pin body (teardrop shape using ellipse + polygon)
+    pin_top = cy - size
+    pin_bottom = cy
+    pin_w = size // 2
+    
+    # Draw shadow
+    shadow_offset = 2
+    draw.ellipse(
+        [cx - pin_w + shadow_offset, pin_top + shadow_offset, 
+         cx + pin_w + shadow_offset, pin_top + size * 2 // 3 + shadow_offset],
+        fill=(0, 0, 0, 60)
+    )
+    
+    # Draw pin body (circle top)
+    draw.ellipse(
+        [cx - pin_w, pin_top, cx + pin_w, pin_top + size * 2 // 3],
+        fill=color, outline=(255, 255, 255), width=2
+    )
+    
+    # Draw pin point (triangle)
+    draw.polygon(
+        [(cx - pin_w // 2, pin_top + size // 3),
+         (cx, pin_bottom),
+         (cx + pin_w // 2, pin_top + size // 3)],
+        fill=color
+    )
+    
+    # Draw white circle inside
+    inner_r = size // 5
+    draw.ellipse(
+        [cx - inner_r, pin_top + size // 6, cx + inner_r, pin_top + size // 6 + inner_r * 2],
+        fill=(255, 255, 255, 230)
+    )
+    
+    # Draw colored dot inside the white circle
+    dot_r = size // 8
+    draw.ellipse(
+        [cx - dot_r, pin_top + size // 6 + (inner_r - dot_r),
+         cx + dot_r, pin_top + size // 6 + (inner_r + dot_r)],
+        fill=color
+    )
+
+
+async def generate_static_map_base64(lat: float, lon: float, zoom: int = 17, 
+                                       width: int = 400, height: int = 400,
+                                       pin_color=(239, 68, 68)) -> Optional[str]:
+    """Generate a static map image with a pin marker using OSM tiles + Pillow"""
+    try:
+        tile_size = 256
+        
+        # Calculate center tile coordinates
+        center_x, center_y = _lat_lon_to_tile(lat, lon, zoom)
+        
+        # Calculate how many tiles we need
+        tiles_x = math.ceil(width / tile_size) + 1
+        tiles_y = math.ceil(height / tile_size) + 1
+        
+        # Starting tile indices
+        start_tile_x = int(center_x) - tiles_x // 2
+        start_tile_y = int(center_y) - tiles_y // 2
+        
+        # Create the composite image
+        composite_w = tiles_x * tile_size
+        composite_h = tiles_y * tile_size
+        composite = Image.new('RGBA', (composite_w, composite_h), (240, 240, 240, 255))
+        
+        # Download tiles
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for tx in range(tiles_x):
+                for ty in range(tiles_y):
+                    tile_x = start_tile_x + tx
+                    tile_y = start_tile_y + ty
+                    
+                    # Wrap tile coordinates
+                    n = 2 ** zoom
+                    tile_x = tile_x % n
+                    if tile_y < 0 or tile_y >= n:
+                        continue
+                    
+                    url = f"https://tile.openstreetmap.org/{zoom}/{tile_x}/{tile_y}.png"
+                    try:
+                        resp = await client.get(url, headers={
+                            "User-Agent": "PowerScan/1.0 (PDF Report Generator)"
+                        })
+                        if resp.status_code == 200:
+                            tile_img = Image.open(io.BytesIO(resp.content)).convert('RGBA')
+                            composite.paste(tile_img, (tx * tile_size, ty * tile_size))
+                    except:
+                        pass  # Skip failed tiles, background will show
+        
+        # Calculate pixel position of the center point within the composite
+        pixel_x = int((center_x - start_tile_x) * tile_size)
+        pixel_y = int((center_y - start_tile_y) * tile_size)
+        
+        # Crop to desired size, centered on the target point
+        left = pixel_x - width // 2
+        top = pixel_y - height // 2
+        right = left + width
+        bottom = top + height
+        
+        cropped = composite.crop((left, top, right, bottom))
+        
+        # Draw pin marker at center
+        draw = ImageDraw.Draw(cropped, 'RGBA')
+        _draw_pin_marker(draw, width // 2, height // 2, color=pin_color, size=36)
+        
+        # Convert to PNG base64
+        img_buffer = io.BytesIO()
+        cropped.save(img_buffer, format='PNG', quality=90)
+        img_buffer.seek(0)
+        b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+        return f"data:image/png;base64,{b64}"
+    except Exception as e:
+        print(f"Error generating static map: {e}")
+        return None
+
+
+
+# PDF translations for all supported languages
+PDF_TRANSLATIONS = {
+    "pt": {
+        "report_title": "Relatório de Inspeção Termográfica",
+        "measure": "Medida",
+        "detected_feeders": "Alimentadores Detectados",
+        "date_time": "Data e Hora",
+        "address": "Endereço",
+        "inspection_name": "Nome Inspeção",
+        "feeder": "Alimentador",
+        "coordinates": "Coordenadas",
+        "temperature": "Temperatura",
+        "relative_humidity": "Umidade Relativa",
+        "load": "Carregamento",
+        "wind": "Vento",
+        "op_number": "Número Operativo",
+        "element": "Elemento",
+        "method": "Método",
+        "calculated": "Calculada",
+        "action": "Ação",
+        "no_elements": "Sem dados de elementos",
+    },
+    "en": {
+        "report_title": "Thermographic Inspection Report",
+        "measure": "Measure",
+        "detected_feeders": "Detected Feeders",
+        "date_time": "Date & Time",
+        "address": "Address",
+        "inspection_name": "Inspection Name",
+        "feeder": "Feeder",
+        "coordinates": "Coordinates",
+        "temperature": "Temperature",
+        "relative_humidity": "Relative Humidity",
+        "load": "Load",
+        "wind": "Wind",
+        "op_number": "Operative Number",
+        "element": "Element",
+        "method": "Method",
+        "calculated": "Calculated",
+        "action": "Action",
+        "no_elements": "No elements data",
+    },
+    "es": {
+        "report_title": "Informe de Inspección Termográfica",
+        "measure": "Medida",
+        "detected_feeders": "Alimentadores Detectados",
+        "date_time": "Fecha y Hora",
+        "address": "Dirección",
+        "inspection_name": "Nombre de Inspección",
+        "feeder": "Alimentador",
+        "coordinates": "Coordenadas",
+        "temperature": "Temperatura",
+        "relative_humidity": "Humedad Relativa",
+        "load": "Carga",
+        "wind": "Viento",
+        "op_number": "Número Operativo",
+        "element": "Elemento",
+        "method": "Método",
+        "calculated": "Calculada",
+        "action": "Acción",
+        "no_elements": "Sin datos de elementos",
+    },
+}
 
 
 def generate_html_report(
@@ -66,9 +269,29 @@ def generate_html_report(
     thermal_img_b64: Optional[str], 
     optical_img_b64: Optional[str],
     map_img_b64: Optional[str], 
-    qr_code_b64: Optional[str]
+    qr_code_b64: Optional[str],
+    client_logo_b64: Optional[str] = None,
+    language: str = "pt"
 ) -> str:
     """Generate HTML for the PDF report matching the exact design"""
+    
+    # Get translations for the requested language (fallback to Portuguese)
+    t = PDF_TRANSLATIONS.get(language, PDF_TRANSLATIONS["pt"])
+    
+    # Load PowerScan logo (always used on right side)
+    powerscan_logo_b64 = _load_logo_base64("powerscan_logo.png")
+    
+    # Right side: always PowerScan logo (fixed)
+    powerscan_logo_img = f'<img src="{powerscan_logo_b64}" class="logo-img-right" />' if powerscan_logo_b64 else '<span style="font-size:14pt;font-weight:bold;color:#7C3AED;">⚡PowerScan</span>'
+    
+    # Left side: client company logo if available, otherwise PowerScan logo
+    if client_logo_b64:
+        left_logo_img = f'<img src="{client_logo_b64}" class="logo-img-left" />'
+    elif powerscan_logo_b64:
+        left_logo_img = f'<img src="{powerscan_logo_b64}" class="logo-img-left" />'
+    else:
+        left_logo_img = '<span style="font-size:14pt;font-weight:bold;color:#7C3AED;">⚡PowerScan</span>'
+    
     
     # Format date
     date_str = "-"
@@ -153,6 +376,8 @@ def generate_html_report(
                 width: 100%;
                 border-collapse: collapse;
                 margin-bottom: 15px;
+                border-bottom: 2px solid #e5e7eb;
+                padding-bottom: 8px;
             }}
             
             .header-table td {{
@@ -160,26 +385,14 @@ def generate_html_report(
                 padding: 5px 0;
             }}
             
-            .logo-kmvi {{
-                font-size: 28pt;
-                font-weight: bold;
-                letter-spacing: -1px;
+            .logo-img-left {{
+                height: 40px;
+                width: auto;
             }}
             
-            .logo-k, .logo-v {{
-                color: #1E3A8A;
-            }}
-            
-            .logo-m, .logo-i {{
-                color: #7C3AED;
-            }}
-            
-            .logo-subtitle {{
-                font-size: 5pt;
-                color: #666;
-                display: block;
-                margin-top: 0;
-                letter-spacing: 0.5px;
+            .logo-img-right {{
+                height: 40px;
+                width: auto;
             }}
             
             .header-title {{
@@ -189,20 +402,8 @@ def generate_html_report(
                 text-align: center;
             }}
             
-            .logo-powerscan {{
+            .logo-right-cell {{
                 text-align: right;
-                font-size: 10pt;
-                color: #666;
-            }}
-            
-            .bolt {{
-                color: #F59E0B;
-                font-size: 12pt;
-            }}
-            
-            .powerscan-text {{
-                color: #7C3AED;
-                font-weight: bold;
             }}
             
             /* Info Section using Tables */
@@ -357,18 +558,13 @@ def generate_html_report(
             <table class="header-table">
                 <tr>
                     <td style="width: 20%;">
-                        <div class="logo-kmvi">
-                            <span class="logo-k">K</span><span class="logo-m">M</span><span class="logo-v">V</span><span class="logo-i">I</span>
-                        </div>
-                        <span class="logo-subtitle">KASCO MULTI-VISION INSPECTION</span>
+                        {left_logo_img}
                     </td>
                     <td style="width: 60%;">
-                        <div class="header-title">Relatório de Inspeção Termográfica</div>
+                        <div class="header-title">{t['report_title']}</div>
                     </td>
-                    <td style="width: 20%;">
-                        <div class="logo-powerscan">
-                            <span class="bolt">⚡</span><span class="powerscan-text">PowerScan</span>
-                        </div>
+                    <td style="width: 20%;" class="logo-right-cell">
+                        {powerscan_logo_img}
                     </td>
                 </tr>
             </table>
@@ -377,15 +573,15 @@ def generate_html_report(
             <table class="info-table">
                 <tr>
                     <td style="width: 30%;">
-                        <div class="info-label">Medida</div>
+                        <div class="info-label">{t['measure']}</div>
                         <div class="info-value link">{measure.id_unico}</div>
                     </td>
                     <td style="width: 40%;">
-                        <div class="info-label">Alimentadores Detectados</div>
+                        <div class="info-label">{t['detected_feeders']}</div>
                         <div class="info-value">{measure.alimentador or '-'}</div>
                     </td>
                     <td style="width: 30%;">
-                        <div class="info-label">Data e Hora</div>
+                        <div class="info-label">{t['date_time']}</div>
                         <div class="info-value">{date_str}</div>
                     </td>
                 </tr>
@@ -395,15 +591,15 @@ def generate_html_report(
             <table class="info-table">
                 <tr>
                     <td style="width: 40%;">
-                        <div class="info-label">Endereço</div>
+                        <div class="info-label">{t['address']}</div>
                         <div class="info-value">{measure.localizacao or '-'}</div>
                     </td>
                     <td style="width: 30%;">
-                        <div class="info-label">Nome Inspeção</div>
+                        <div class="info-label">{t['inspection_name']}</div>
                         <div class="info-value">{measure.nome_inspecao or '-'}</div>
                     </td>
                     <td style="width: 30%;">
-                        <div class="info-label">Alimentador</div>
+                        <div class="info-label">{t['feeder']}</div>
                         <div class="info-value">{measure.alimentador or '-'}</div>
                     </td>
                 </tr>
@@ -413,23 +609,23 @@ def generate_html_report(
             <table class="info-table">
                 <tr>
                     <td style="width: 25%;">
-                        <div class="info-label">Coordenadas</div>
+                        <div class="info-label">{t['coordinates']}</div>
                         <div class="info-value">{coords}</div>
                     </td>
                     <td style="width: 15%;">
-                        <div class="info-label">Temperatura</div>
+                        <div class="info-label">{t['temperature']}</div>
                         <div class="info-value">{temp}</div>
                     </td>
                     <td style="width: 20%;">
-                        <div class="info-label">Umidade Relativa</div>
+                        <div class="info-label">{t['relative_humidity']}</div>
                         <div class="info-value">{humidity}</div>
                     </td>
                     <td style="width: 20%;">
-                        <div class="info-label">Carregamento</div>
+                        <div class="info-label">{t['load']}</div>
                         <div class="info-value">{load}</div>
                     </td>
                     <td style="width: 20%;">
-                        <div class="info-label">Vento</div>
+                        <div class="info-label">{t['wind']}</div>
                         <div class="info-value">{wind}</div>
                     </td>
                 </tr>
@@ -447,16 +643,16 @@ def generate_html_report(
             <table class="elements-table">
                 <thead>
                     <tr>
-                        <th>Número Operativo</th>
-                        <th>Elemento</th>
-                        <th>Temperatura</th>
-                        <th>Método</th>
-                        <th>Calculada</th>
-                        <th>Ação</th>
+                        <th>{t['op_number']}</th>
+                        <th>{t['element']}</th>
+                        <th>{t['temperature']}</th>
+                        <th>{t['method']}</th>
+                        <th>{t['calculated']}</th>
+                        <th>{t['action']}</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {elements_rows if elements_rows else '<tr><td colspan="6" style="text-align:center;color:#999;">No elements data</td></tr>'}
+                    {elements_rows if elements_rows else f'<tr><td colspan="6" style="text-align:center;color:#999;">{t["no_elements"]}</td></tr>'}
                 </tbody>
             </table>
         </div>
@@ -467,18 +663,13 @@ def generate_html_report(
             <table class="header-table">
                 <tr>
                     <td style="width: 20%;">
-                        <div class="logo-kmvi">
-                            <span class="logo-k">K</span><span class="logo-m">M</span><span class="logo-v">V</span><span class="logo-i">I</span>
-                        </div>
-                        <span class="logo-subtitle">KASCO MULTI-VISION INSPECTION</span>
+                        {left_logo_img}
                     </td>
                     <td style="width: 60%;">
-                        <div class="header-title">Relatório de Inspeção Termográfica</div>
+                        <div class="header-title">{t['report_title']}</div>
                     </td>
-                    <td style="width: 20%;">
-                        <div class="logo-powerscan">
-                            <span class="bolt">⚡</span><span class="powerscan-text">PowerScan</span>
-                        </div>
+                    <td style="width: 20%;" class="logo-right-cell">
+                        {powerscan_logo_img}
                     </td>
                 </tr>
             </table>
@@ -517,7 +708,9 @@ async def generate_pdf(
     measure: MeasureData,
     elements: List[ElementData],
     thermal_image_url: Optional[str] = None,
-    optical_image_url: Optional[str] = None
+    optical_image_url: Optional[str] = None,
+    client_company_logo_url: Optional[str] = None,
+    language: str = "pt"
 ) -> bytes:
     """
     Generate a complete PDF report for a measure.
@@ -527,6 +720,8 @@ async def generate_pdf(
         elements: List of element data for the table
         thermal_image_url: URL to the thermal image
         optical_image_url: URL to the optical image
+        client_company_logo_url: URL to the client company logo
+        language: Language code for PDF labels (en, es, pt)
     
     Returns:
         PDF file as bytes
@@ -535,17 +730,21 @@ async def generate_pdf(
     thermal_img_b64 = await download_image_as_base64(thermal_image_url) if thermal_image_url else None
     optical_img_b64 = await download_image_as_base64(optical_image_url) if optical_image_url else None
     
-    # Download map image
+    # Download client company logo if available
+    client_logo_b64 = await download_image_as_base64(client_company_logo_url) if client_company_logo_url else None
+    
+    # Generate map image with pin marker
     map_img_b64 = None
     if measure.latitude and measure.longitude:
-        map_url = get_static_map_url(measure.latitude, measure.longitude)
-        if map_url:
-            map_img_b64 = await download_image_as_base64(map_url)
+        pin_color = (239, 68, 68) if measure.temp1_c else (59, 130, 246)
+        map_img_b64 = await generate_static_map_base64(
+            measure.latitude, measure.longitude, pin_color=pin_color
+        )
     
-    # Generate QR code - links to Google Maps with coordinates
+    # Generate QR code - links to Google Maps Street View with coordinates
     if measure.latitude and measure.longitude:
-        # Google Maps URL format that opens location directly
-        qr_data = f"https://www.google.com/maps?q={measure.latitude},{measure.longitude}"
+        # Google Maps Street View URL format
+        qr_data = f"https://maps.google.com/maps?q=&layer=c&cbll={measure.latitude},{measure.longitude}"
     else:
         # Fallback to PowerScan app link if no coordinates
         qr_data = f"https://powerscan.app/measure/{measure.id_unico}"
@@ -555,7 +754,9 @@ async def generate_pdf(
     html_content = generate_html_report(
         measure, elements,
         thermal_img_b64, optical_img_b64,
-        map_img_b64, qr_code_b64
+        map_img_b64, qr_code_b64,
+        client_logo_b64,
+        language
     )
     
     # Convert to PDF
