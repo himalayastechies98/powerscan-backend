@@ -741,10 +741,9 @@ async def generate_pdf(
             measure.latitude, measure.longitude, pin_color=pin_color
         )
     
-    # Generate QR code - links to Google Maps Street View with coordinates
+    # Generate QR code - links to Google Maps at the exact coordinates
     if measure.latitude and measure.longitude:
-        # Google Maps Street View URL format
-        qr_data = f"https://maps.google.com/maps?q=&layer=c&cbll={measure.latitude},{measure.longitude}"
+        qr_data = f"https://www.google.com/maps?q={measure.latitude},{measure.longitude}"
     else:
         # Fallback to PowerScan app link if no coordinates
         qr_data = f"https://powerscan.app/measure/{measure.id_unico}"

@@ -14,6 +14,7 @@ from typing import Optional
 from models import MeasureData, ElementData, PDFRequest
 from thermal import process_thermal_upload
 from pdf_generator import generate_pdf, generate_qr_code_base64, generate_html_report, html_to_pdf
+from thermal_sdk import router as thermal_sdk_router
 
 
 app = FastAPI(
@@ -29,6 +30,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include thermal SDK router
+app.include_router(thermal_sdk_router, prefix="/api/thermal-sdk", tags=["Thermal SDK"])
 
 
 # ============ HEALTH CHECK ============

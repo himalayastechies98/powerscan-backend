@@ -6,3 +6,4 @@ python-multipart
 xhtml2pdf
 qrcode
 httpx
+flirimageextractor
