@@ -2,7 +2,7 @@
 PowerScan Backend API
 - Thermal image processing
 - PDF report generation
-"""
+ """
 import io
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
